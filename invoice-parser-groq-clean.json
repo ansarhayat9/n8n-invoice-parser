@@ -1,0 +1,491 @@
+{
+  "name": "Invoice Parser (Drive -> Groq -> Sheets -> Gmail)",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Invoice Parser (Groq, free)\n1. Set credentials on Drive, Sheets, Gmail and Groq nodes\n2. Drive Trigger: pick the folder to watch\n3. Sheets nodes: pick your sheet; row 1 headers must match: Invoice Number, Sender Name, Sender Email, Invoice Date, Due Date, Currency, Total Amount, File Name, File Link, Processed At\n4. Gmail nodes: set the billing team address\n5. Replace YOUR_GOOGLE_SHEET_ID in the success email link ",
+        "height": 260,
+        "width": 520
+      },
+      "id": "773f8c56-0d2a-4be0-80d6-a9ae329f5b1f",
+      "name": "Setup Notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "triggerOn": "specificFolder",
+        "folderToWatch": {
+          "__rl": true,
+          "value": "YOUR_DRIVE_FOLDER_ID",
+          "mode": "id"
+        },
+        "event": "fileCreated",
+        "options": {}
+      },
+      "id": "f19c9230-8aa9-4b42-b821-691f296a75dd",
+      "name": "Google Drive Trigger",
+      "type": "n8n-nodes-base.googleDriveTrigger",
+      "typeVersion": 1,
+      "position": [
+        208,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "c1000000-0000-4000-8000-000000000001",
+              "leftValue": "={{ $json.mimeType }}",
+              "rightValue": "application/pdf",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "984d9c81-cfb9-4186-8237-57af16558829",
+      "name": "Is PDF?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        432,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": {
+          "__rl": true,
+          "value": "={{ $json.id }}",
+          "mode": "id"
+        },
+        "options": {}
+      },
+      "id": "6049b085-dc26-4ec0-a7db-328210ba0033",
+      "name": "Download PDF",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        640,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "options": {}
+      },
+      "id": "624c4d68-16eb-48ce-be6d-ce8f029bd6e2",
+      "name": "Extract PDF Text",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        864,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "text": "={{ $json.text }}",
+        "schemaType": "manual",
+        "inputSchema": "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"invoice_number\": {\n      \"type\": \"string\",\n      \"description\": \"Invoice number or ID exactly as printed\"\n    },\n    \"sender_name\": {\n      \"type\": \"string\",\n      \"description\": \"Company or person that issued the invoice\"\n    },\n    \"sender_email\": {\n      \"type\": \"string\",\n      \"description\": \"Email address of the issuer\"\n    },\n    \"invoice_date\": {\n      \"type\": \"string\",\n      \"description\": \"Invoice date in YYYY-MM-DD\"\n    },\n    \"due_date\": {\n      \"type\": \"string\",\n      \"description\": \"Payment due date in YYYY-MM-DD\"\n    },\n    \"currency\": {\n      \"type\": \"string\",\n      \"description\": \"3-letter currency code such as USD, PKR, EUR\"\n    },\n    \"total_amount\": {\n      \"type\": \"number\",\n      \"description\": \"Final total amount due as a plain number, no currency symbol\"\n    }\n  }\n}",
+        "options": {
+          "systemPromptTemplate": "You are an accurate invoice data extractor. Extract only values that are explicitly written in the text. If a field is not present, omit it. Never guess or invent values. Dates must be YYYY-MM-DD. total_amount is the final amount due as a plain number."
+        }
+      },
+      "id": "28d536c2-2b80-4a95-9ef8-4c4fc5827fc9",
+      "name": "Extract Invoice Fields",
+      "type": "@n8n/n8n-nodes-langchain.informationExtractor",
+      "typeVersion": 1.2,
+      "position": [
+        1088,
+        320
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "options": {
+          "temperature": 0
+        }
+      },
+      "id": "a89f683c-079c-4370-863f-28e80e387aa8",
+      "name": "Groq Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [
+        1104,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const out = $json.output || {};\nconst file = $('Google Drive Trigger').item.json;\nconst clean = (v) => (v === null || v === undefined) ? '' : String(v).trim();\n\nconst amount = parseFloat(String(out.total_amount ?? '').replace(/[^0-9.\\-]/g, ''));\nconst invoiceNumber = clean(out.invoice_number);\nconst isValid = invoiceNumber !== '' && Number.isFinite(amount);\n\nreturn {\n  json: {\n    invoice_number: invoiceNumber,\n    sender_name: clean(out.sender_name),\n    sender_email: clean(out.sender_email).toLowerCase(),\n    invoice_date: clean(out.invoice_date),\n    due_date: clean(out.due_date),\n    currency: clean(out.currency).toUpperCase(),\n    total_amount: Number.isFinite(amount) ? amount : '',\n    file_name: clean(file.name),\n    file_link: file.webViewLink || `https://drive.google.com/file/d/${file.id}/view`,\n    processed_at: new Date().toISOString(),\n    is_valid: isValid\n  }\n};"
+      },
+      "id": "1fd4cc0a-ff1c-4860-b858-6ed3e101296a",
+      "name": "Clean and Validate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "c2000000-0000-4000-8000-000000000001",
+              "leftValue": "={{ $json.is_valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "817e1b9f-429e-40bc-bc40-b2330db84abe",
+      "name": "Data Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1664,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "id"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Invoice Number": "={{ $json.invoice_number }}",
+            "Sender Name": "={{ $json.sender_name }}",
+            "Sender Email": "={{ $json.sender_email }}",
+            "Invoice Date": "={{ $json.invoice_date }}",
+            "Due Date": "={{ $json.due_date }}",
+            "Currency": "={{ $json.currency }}",
+            "Total Amount": "={{ $json.total_amount }}",
+            "File Name": "={{ $json.file_name }}",
+            "File Link": "={{ $json.file_link }}",
+            "Processed At": "={{ $json.processed_at }}"
+          },
+          "matchingColumns": [
+            "Invoice Number"
+          ],
+          "schema": [
+            {
+              "id": "Invoice Number",
+              "displayName": "Invoice Number",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Sender Name",
+              "displayName": "Sender Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Sender Email",
+              "displayName": "Sender Email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Invoice Date",
+              "displayName": "Invoice Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Due Date",
+              "displayName": "Due Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Currency",
+              "displayName": "Currency",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Total Amount",
+              "displayName": "Total Amount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "File Name",
+              "displayName": "File Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "File Link",
+              "displayName": "File Link",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Processed At",
+              "displayName": "Processed At",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "e1c22989-aa7d-467a-a09b-e6f40a832e59",
+      "name": "Save to Invoice Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1904,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "sendTo": "billing@example.com",
+        "subject": "={{ 'New Invoice Recorded: ' + $('Clean and Validate').item.json.invoice_number + ' (' + $('Clean and Validate').item.json.sender_name + ')' }}",
+        "message": "=<div style=\"font-family:Arial,sans-serif;font-size:14px;color:#222\"><p>Dear Billing Team,</p><p>A new invoice has been received and recorded in the Invoice Database.</p><table style=\"border-collapse:collapse\"><tr><td style=\"padding:6px 12px;border:1px solid #ddd;background:#f6f6f6\"><b>Invoice Number</b></td><td style=\"padding:6px 12px;border:1px solid #ddd\">{{ $('Clean and Validate').item.json.invoice_number }}</td></tr><tr><td style=\"padding:6px 12px;border:1px solid #ddd;background:#f6f6f6\"><b>Sender</b></td><td style=\"padding:6px 12px;border:1px solid #ddd\">{{ $('Clean and Validate').item.json.sender_name }}</td></tr><tr><td style=\"padding:6px 12px;border:1px solid #ddd;background:#f6f6f6\"><b>Sender Email</b></td><td style=\"padding:6px 12px;border:1px solid #ddd\">{{ $('Clean and Validate').item.json.sender_email }}</td></tr><tr><td style=\"padding:6px 12px;border:1px solid #ddd;background:#f6f6f6\"><b>Total Amount</b></td><td style=\"padding:6px 12px;border:1px solid #ddd\">{{ $('Clean and Validate').item.json.currency }} {{ $('Clean and Validate').item.json.total_amount }}</td></tr><tr><td style=\"padding:6px 12px;border:1px solid #ddd;background:#f6f6f6\"><b>Invoice Date</b></td><td style=\"padding:6px 12px;border:1px solid #ddd\">{{ $('Clean and Validate').item.json.invoice_date }}</td></tr><tr><td style=\"padding:6px 12px;border:1px solid #ddd;background:#f6f6f6\"><b>Due Date</b></td><td style=\"padding:6px 12px;border:1px solid #ddd\">{{ $('Clean and Validate').item.json.due_date }}</td></tr></table><p><a href=\"{{ $('Clean and Validate').item.json.file_link }}\">View original PDF</a> &nbsp;|&nbsp; <a href=\"https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID/edit\">Open Invoice Database</a></p><p>Best regards,<br>Invoice Automation</p></div>",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "3b260db0-58e6-4b16-8e3c-45725d394ced",
+      "name": "Notify Billing Team",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        2144,
+        224
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "webhookId": "28254d4d-028b-4324-9285-fb6211b86713"
+    },
+    {
+      "parameters": {
+        "sendTo": "billing@example.com",
+        "subject": "={{ 'Invoice needs manual review: ' + $('Clean and Validate').item.json.file_name }}",
+        "message": "=<div style=\"font-family:Arial,sans-serif;font-size:14px;color:#222\"><p>Dear Billing Team,</p><p>A new file was uploaded but the invoice number or total amount could not be read reliably. It was <b>not</b> added to the Invoice Database. Please review it manually.</p><p>File: <a href=\"{{ $('Clean and Validate').item.json.file_link }}\">{{ $('Clean and Validate').item.json.file_name }}</a></p><p>Best regards,<br>Invoice Automation</p></div>",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "6765e990-ead3-4f11-b25e-5c1659a09dcd",
+      "name": "Notify Manual Review",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1904,
+        448
+      ],
+      "webhookId": "04dc04f1-a428-4a84-8a25-11a33d132459"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Google Drive Trigger": {
+      "main": [
+        [
+          {
+            "node": "Is PDF?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is PDF?": {
+      "main": [
+        [
+          {
+            "node": "Download PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download PDF": {
+      "main": [
+        [
+          {
+            "node": "Extract PDF Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract PDF Text": {
+      "main": [
+        [
+          {
+            "node": "Extract Invoice Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Extract Invoice Fields",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Invoice Fields": {
+      "main": [
+        [
+          {
+            "node": "Clean and Validate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clean and Validate": {
+      "main": [
+        [
+          {
+            "node": "Data Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Data Valid?": {
+      "main": [
+        [
+          {
+            "node": "Save to Invoice Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Notify Manual Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save to Invoice Sheet": {
+      "main": [
+        [
+          {
+            "node": "Notify Billing Team",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "meta": {},
+  "nodeGroups": [],
+  "tags": []
+}
